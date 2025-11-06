@@ -14,7 +14,7 @@ function App() {
   const [resultImage, setResultImage] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [iterations, setIterations] = useState(5); // Reduced from 15 to 5 for faster processing
-  const [threshold, setThreshold] = useState(30); // Reduced from 50 to 30 for fewer edges
+  const [threshold, setThreshold] = useState(60); // Set to 60 for good connectivity
   const [stats, setStats] = useState(null);
   const [showInfo, setShowInfo] = useState(false);
 

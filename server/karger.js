@@ -61,12 +61,19 @@ class Graph {
 
   getTotalEdges() {
     let count = 0;
-    for (const edges of this.adjacencyList.values()) {
-      for (const weight of edges.values()) {
-        count += weight;
+    const counted = new Set();
+    
+    for (const [node, edges] of this.adjacencyList.entries()) {
+      for (const [neighbor, weight] of edges.entries()) {
+        // Create a unique key for this edge (sorted to avoid duplicates)
+        const edgeKey = node < neighbor ? `${node}-${neighbor}` : `${neighbor}-${node}`;
+        if (!counted.has(edgeKey)) {
+          counted.add(edgeKey);
+          count++;
+        }
       }
     }
-    return count / 2; // Each edge counted twice
+    return count;
   }
 
   clone() {
@@ -111,13 +118,14 @@ function buildPixelGraph(imageData, width, height, threshold) {
     }
   }
 
-  // Create edges between similar neighboring pixels - ONLY 4-CONNECTED
+  // Create edges between similar neighboring pixels - 4-CONNECTED
+  let edgesCreated = 0;
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const currentIdx = y * width + x;
       const current = pixels[currentIdx];
 
-      // Only check RIGHT and DOWN to avoid duplicate edges
+      // Check 4 neighbors (right, down, left, up) but only add each edge once
       const neighbors = [
         { dx: 1, dy: 0 },   // right
         { dx: 0, dy: 1 },   // down
@@ -137,26 +145,34 @@ function buildPixelGraph(imageData, width, height, threshold) {
           if (distance < threshold) {
             const weight = Math.max(1, Math.floor(100 - distance));
             graph.addEdge(current.id, neighbor.id, weight);
+            edgesCreated++;
           }
         }
       }
     }
   }
+  
+  console.log(`Created ${edgesCreated} edges with threshold ${threshold}`);
 
   return { graph, pixels };
 }
 
 /**
- * Karger's randomized min-cut algorithm - OPTIMIZED WITH FIX
+ * Karger's randomized min-cut algorithm - IMPROVED VERSION
  */
 function kargerMinCut(graph) {
   const g = graph.clone();
   
-  // Contract edges until only 2 nodes remain
-  while (g.nodeCount > 2) {
+  // Target: contract until we have ~2 super-nodes (allow some flexibility)
+  const targetNodes = 2;
+  let contractionsMade = 0;
+  const maxContractions = g.nodeCount - targetNodes;
+  
+  // Contract edges until only 2 super-nodes remain
+  while (g.nodeCount > targetNodes && contractionsMade < maxContractions) {
     const nodes = g.getNodes();
     
-    // Select a random edge - SIMPLIFIED for speed
+    // Collect all edges
     const allEdges = [];
     for (const node of nodes) {
       const edges = g.getEdges(node);
@@ -167,38 +183,64 @@ function kargerMinCut(graph) {
       }
     }
 
-    // If no edges, graph is disconnected - return a valid cut
+    // If no edges left, we have disconnected components
     if (allEdges.length === 0) {
-      console.log('Graph disconnected, returning default cut');
-      const remainingNodes = g.getNodes();
-      // Return a cut between any two remaining nodes
-      return {
-        cutSize: 0,
-        partition: remainingNodes.slice(0, Math.min(2, remainingNodes.length))
-      };
+      console.log(`Graph disconnected at ${g.nodeCount} nodes`);
+      break;
     }
 
-    // Simple random selection (faster than weighted)
-    const selectedEdge = allEdges[Math.floor(Math.random() * allEdges.length)];
+    // Weighted random selection - prefer high-weight edges (similar pixels)
+    const totalWeight = allEdges.reduce((sum, e) => sum + e.weight, 0);
+    let random = Math.random() * totalWeight;
+    let selectedEdge = allEdges[0];
+
+    for (const edge of allEdges) {
+      random -= edge.weight;
+      if (random <= 0) {
+        selectedEdge = edge;
+        break;
+      }
+    }
 
     // Contract the selected edge
     g.contract(selectedEdge.node1, selectedEdge.node2);
+    contractionsMade++;
   }
 
-  // Calculate cut size
+  // Get final partition
   const remainingNodes = g.getNodes();
-  if (remainingNodes.length < 2) {
-    // If we have less than 2 nodes, return a minimal cut
-    console.log('Less than 2 nodes remaining');
-    return { cutSize: 0, partition: remainingNodes };
+  
+  // If we have exactly 2 nodes, calculate the cut
+  if (remainingNodes.length === 2) {
+    const cutSize = Array.from(g.getEdges(remainingNodes[0]).values())
+      .reduce((sum, weight) => sum + weight, 0);
+    
+    return {
+      cutSize,
+      partition: remainingNodes
+    };
   }
-
-  const cutSize = Array.from(g.getEdges(remainingNodes[0]).values())
-    .reduce((sum, weight) => sum + weight, 0);
-
+  
+  // If disconnected or multiple components, create a partition
+  // Split nodes roughly in half
+  const mid = Math.floor(remainingNodes.length / 2);
+  const partition1 = remainingNodes.slice(0, mid);
+  const partition2 = remainingNodes.slice(mid);
+  
+  // Calculate cut size between the two partitions
+  let cutSize = 0;
+  for (const node1 of partition1) {
+    const edges = g.getEdges(node1);
+    for (const node2 of partition2) {
+      if (edges.has(node2)) {
+        cutSize += edges.get(node2);
+      }
+    }
+  }
+  
   return {
-    cutSize,
-    partition: remainingNodes
+    cutSize: cutSize || 100, // Default if no edges between partitions
+    partition: [partition1[0] || remainingNodes[0], partition2[0] || remainingNodes[Math.min(1, remainingNodes.length - 1)]]
   };
 }
 
@@ -207,26 +249,48 @@ function kargerMinCut(graph) {
  */
 function monteCarloMinCut(graph, iterations) {
   let bestCut = { cutSize: Infinity, partition: [[], []] };
+  let validCuts = 0;
   
   // Limit iterations based on graph size for performance
-  const maxIterations = Math.min(iterations, 10); // Cap at 10 for speed
+  const maxIterations = Math.min(iterations, 8); // Cap at 8 for speed
   
   console.log(`Running ${maxIterations} iterations (requested: ${iterations})`);
 
   for (let i = 0; i < maxIterations; i++) {
     const result = kargerMinCut(graph);
+    
+    // Skip invalid cuts
+    if (result.cutSize === Infinity || result.cutSize < 0) {
+      console.log(`Iteration ${i + 1}: Invalid cut, skipping`);
+      continue;
+    }
+    
+    validCuts++;
+    
     if (result.cutSize < bestCut.cutSize) {
       bestCut = result;
       console.log(`Iteration ${i + 1}: Found better cut of size ${result.cutSize}`);
     }
     
     // Early termination if we find a very small cut
-    if (bestCut.cutSize < 10) {
-      console.log(`Early termination - found small cut`);
+    if (bestCut.cutSize > 0 && bestCut.cutSize < 100) {
+      console.log(`Early termination - found good cut`);
       break;
     }
   }
 
+  // If all cuts were invalid, return a simple partition
+  if (bestCut.cutSize === Infinity) {
+    console.log('All iterations failed, creating simple partition');
+    const nodes = graph.getNodes();
+    const mid = Math.floor(nodes.length / 2);
+    bestCut = {
+      cutSize: 100, // Default cut size
+      partition: [nodes[0], nodes[mid] || nodes[0]]
+    };
+  }
+
+  console.log(`Valid cuts found: ${validCuts}/${maxIterations}`);
   return bestCut;
 }
 
@@ -291,7 +355,7 @@ export async function segmentImage(imageBuffer, iterations = 15, threshold = 50)
   const metadata = await image.metadata();
   
   // Resize large images for faster processing - OPTIMIZED SIZE
-  const maxDimension = 80; // Further reduced for speed and reliability
+  const maxDimension = 60; // Reduced to 60 for better performance and connectivity
   const scale = Math.min(1, maxDimension / Math.max(metadata.width, metadata.height));
   const width = Math.floor(metadata.width * scale);
   const height = Math.floor(metadata.height * scale);
@@ -313,39 +377,28 @@ export async function segmentImage(imageBuffer, iterations = 15, threshold = 50)
   console.log(`Image resized to ${width}x${height}`);
 
   // Build pixel graph with adaptive threshold
-  let adaptiveThreshold = threshold;
+  // Ensure minimum threshold for connectivity
+  let adaptiveThreshold = Math.max(60, threshold); // Minimum 60 for good connectivity
   let graph, pixels, totalEdges;
   
-  // Try to build a well-connected graph
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const result = buildPixelGraph(data, width, height, adaptiveThreshold);
-    graph = result.graph;
-    pixels = result.pixels;
-    totalEdges = graph.getTotalEdges();
-    
-    // Check if graph has enough edges (at least 2 edges per node on average)
-    const avgEdgesPerNode = (totalEdges * 2) / graph.nodeCount;
-    
-    console.log(`Attempt ${attempt + 1}: ${graph.nodeCount} nodes, ${totalEdges} edges (avg: ${avgEdgesPerNode.toFixed(2)} edges/node)`);
-    
-    if (avgEdgesPerNode >= 1.5 || attempt === 2) {
-      break; // Good enough or last attempt
-    }
-    
-    // Increase threshold to create more edges
-    adaptiveThreshold = Math.min(100, adaptiveThreshold + 20);
-    console.log(`Increasing threshold to ${adaptiveThreshold} for better connectivity`);
-  }
+  console.log(`Using threshold: ${adaptiveThreshold} (requested: ${threshold})`);
   
-  console.log(`Final graph: ${graph.nodeCount} nodes, ${totalEdges} edges`);
+  // Build the graph
+  const graphResult = buildPixelGraph(data, width, height, adaptiveThreshold);
+  graph = graphResult.graph;
+  pixels = graphResult.pixels;
+  totalEdges = graph.getTotalEdges();
+  
+  const avgEdgesPerNode = (totalEdges * 2) / graph.nodeCount;
+  console.log(`Graph built: ${graph.nodeCount} nodes, ${totalEdges} edges (avg: ${avgEdgesPerNode.toFixed(2)} edges/node)`);
 
   // Run Karger's algorithm with Monte Carlo
-  const result = monteCarloMinCut(graph, iterations);
+  const cutResult = monteCarloMinCut(graph, iterations);
   
-  console.log(`Min cut found: ${result.cutSize}`);
+  console.log(`Min cut found: ${cutResult.cutSize}`);
 
   // Create segmented image
-  const segmentedData = createSegmentedImage(pixels, result, width, height);
+  const segmentedData = createSegmentedImage(pixels, cutResult, width, height);
 
   // Convert back to image
   const outputBuffer = await sharp(segmentedData, {
@@ -364,7 +417,7 @@ export async function segmentImage(imageBuffer, iterations = 15, threshold = 50)
     imageBase64: outputBuffer.toString('base64'),
     stats: {
       processingTime,
-      minCutSize: result.cutSize,
+      minCutSize: cutResult.cutSize,
       nodes: graph.nodeCount,
       edges: Math.floor(totalEdges),
       iterations

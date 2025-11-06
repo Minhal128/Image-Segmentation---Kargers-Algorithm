@@ -61,7 +61,7 @@ export function ControlPanel({
             </span>
           </div>
           <Slider
-            min={10}
+            min={60}
             max={100}
             step={5}
             value={threshold}
